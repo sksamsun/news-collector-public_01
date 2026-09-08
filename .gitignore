@@ -1,0 +1,8 @@
+.utf-8''采集脚本_20260908001_增加市场洞察.lock
+/reports/
+*.html
+*.xlsx
+*.log
+__pycache__/
+*.pyc
+.env
