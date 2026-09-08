@@ -1,45 +1,38 @@
-name: News Collector Job Public
+name: Daily News Collector public
 on:
   workflow_dispatch:
-  schedule:
-    # UTC时间 0点 = 北京时间早上8点，每天执行
-    - cron: '0 0 * * *'
-  push:
-    branches: [ main ]
+  # 可选：每天北京时间 10:00 自动跑（UTC 02:00）。不需要就删掉下面整段 schedule
+  # schedule:
+  #   - cron: '0 2 * * *'
 
 concurrency:
-  group: collector-job
-  cancel-in-progress: true
+  group: news-collector-daily
+  cancel-in-progress: false
 
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
-    permissions:
-      contents: read
+    timeout-minutes: 110
     env:
       TZ: Asia/Shanghai
+      NEWS_OUTPUT_DIR: ${{ github.workspace }}/reports
     steps:
-      - name: Checkout代码
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 安装Chrome浏览器(Selenium使用)
-        uses: browser-actions/setup-chrome@v1
-
-      - name: Python 3.11环境
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: 'pip'
+          python-version: '3.11'
 
-      - name: 安装依赖包
+      # 脚本只用 requests，从不需要浏览器；ubuntu-latest(24.04) apt 已无 chromium 包，故不装。
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 tencent-cloud-tmt textrank4zh sumy xlsxwriter selenium webdriver-manager numpy
+          pip install requests beautifulsoup4 tencentcloud-sdk-python selenium lxml textrank4zh sumy numpy xlsxwriter
 
-      - name: 运行采集脚本
+      - name: Run script
         env:
-          NEWS_OUTPUT_DIR: ${{ github.workspace }}/reports
           TENCENT_SECRET_ID_1: ${{ secrets.TENCENT_SECRET_ID_1 }}
           TENCENT_SECRET_KEY_1: ${{ secrets.TENCENT_SECRET_KEY_1 }}
           TENCENT_SECRET_ID_2: ${{ secrets.TENCENT_SECRET_ID_2 }}
@@ -47,16 +40,27 @@ jobs:
           BAIDU_APP_ID: ${{ secrets.BAIDU_APP_ID }}
           BAIDU_SECRET_KEY: ${{ secrets.BAIDU_SECRET_KEY }}
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
-          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           RECIPIENT_EMAILS: ${{ secrets.RECIPIENT_EMAILS }}
-        run: python 采集脚本_20260908001_增加市场洞察.py
+        run: |
+          # 自动查找仓库根目录下的采集脚本（取字典序最后一个，通常是新版），避免文件名漂移导致找不到文件
+          SCRIPT=$(ls 采集脚本_*.py 2>/dev/null | sort | tail -n1)
+          if [ -z "$SCRIPT" ]; then
+            echo "::error::仓库根目录未找到 采集脚本_*.py，请确认脚本已提交到仓库根目录"
+            echo "当前目录文件列表："
+            ls -la
+            exit 1
+          fi
+          echo "使用脚本: $SCRIPT"
+          python3 -u "$SCRIPT"
 
-      - name: 上传生成报告制品
+      - name: Upload report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: news-report-output
-          path: ./reports/
-          retention-days: 7
+          name: news-report-${{ github.run_id }}
+          path: |
+            ${{ env.NEWS_OUTPUT_DIR }}/*.html
+            ${{ env.NEWS_OUTPUT_DIR }}/*.xlsx
+          retention-days: 30
