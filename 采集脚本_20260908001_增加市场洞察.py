@@ -12,6 +12,7 @@
 8. 修复send_email缺少script_path参数，恢复脚本附件功能
 9. 原有404修复、URL拼接、敏感过滤、Selenium兼容全部保留
 10. 【新增】并行化处理：源站6并发、详情页15并发、翻译8并发，目标50分钟
+11. 【新增】三合一翻译：标题+摘要+洞察合并为一次API调用，进一步降低限流风险
 """
 import requests
 import sys
@@ -144,9 +145,11 @@ FROM_LANG = "zh"
 TO_LANG = "ko"
 BAIDU_TO_LANG = "kor"
 TRANSLATE_ORDER = ["tencent1", "tencent2", "baidu", "youdao", "mymemory", "google"]
-# 分割标记，用于合并标题摘要一次性翻译
-SPLIT_TITLE_TAG = "###TITLE###"
+# 分割标记，用于合并标题摘要洞察一次性翻译
+# ===== 改动11-1：新增洞察分隔标记，三合一翻译 =====
+SPLIT_TITLE_TAG   = "###TITLE###"
 SPLIT_SUMMARY_TAG = "###SUMMARY###"
+SPLIT_INSIGHT_TAG = "###INSIGHT###"
 
 # ==================== 智谱AI摘要配置 ====================
 # 免费额度：每月100万token，注册即得 https://open.bigmodel.cn
@@ -1906,7 +1909,8 @@ def filter_brand_news_parallel(raw_all_list, hours=24):
     matched_news.sort(key=lambda x: x['pub_time'] if x['pub_time'] else datetime.min, reverse=True)
     return matched_news
 
-# 生成HTML报告【合并标题摘要单次翻译，减少API请求】
+# 生成HTML报告【三合一翻译：标题+摘要+洞察合并为一次API调用】
+# ===== 改动11-2：核心优化 —— 三合一翻译，减少2/3 API请求 =====
 def generate_html_report(news_items, report_date):
     brand_groups = {}
     for item in news_items:
@@ -2255,47 +2259,78 @@ def generate_html_report(news_items, report_date):
             src = item['source']
             url = item['url']
             t_show = item['pub_time'].strftime('%Y-%m-%d %H:%M') if item['pub_time'] else "时间未知"
+            # 洞察中文原文（可能为空）
+            ic = (item.get('insight') or "").strip()
 
-            # 翻译带异常保护，单条失败不影响后续
+            # ===== 改动11-3：三合一翻译 —— 标题+摘要+洞察 合并为一次 API 调用 =====
+            # 初始化韩语字段（默认回退中文）
+            kr_title = tc
+            kr_summary = sc
+            kr_insight = ""
+
             try:
-                # 合并标题+摘要，一次翻译，减少API调用
-                combine_text = f"{SPLIT_TITLE_TAG}{tc}{SPLIT_SUMMARY_TAG}{sc}"
-                combine_kr = translate_text(combine_text)
-                if SPLIT_TITLE_TAG in combine_kr and SPLIT_SUMMARY_TAG in combine_kr:
-                    kr_title, kr_summary = combine_kr.split(SPLIT_SUMMARY_TAG, 1)
-                    kr_title = kr_title.replace(SPLIT_TITLE_TAG, "").strip()
-                    kr_summary = kr_summary.strip()
-                else:
-                    # 分割标记丢失，降级两次翻译
-                    kr_title = translate_text(tc)
-                    kr_summary = translate_text(sc)
-            except Exception as e:
-                print(f"翻译单条异常: {e}，使用原文")
-                kr_title = tc
-                kr_summary = sc
+                # 智能组装：只有非空字段才加入标记，减少传输量
+                parts = [f"{SPLIT_TITLE_TAG}{tc}"]
+                if sc:
+                    parts.append(f"{SPLIT_SUMMARY_TAG}{sc}")
+                if ic:
+                    parts.append(f"{SPLIT_INSIGHT_TAG}{ic}")
+                combine_text = "".join(parts)
 
-            # 存储翻译结果，供Excel生成使用
+                # 单次翻译调用
+                combine_kr = translate_text(combine_text)
+
+                # 解析拆分（顺序解析，兼容部分字段缺失或标记丢失）
+                if SPLIT_TITLE_TAG in combine_kr and SPLIT_SUMMARY_TAG in combine_kr:
+                    # 标准：包含起码 TITLE 和 SUMMARY 标记
+                    # 去掉开头到 TITLE_TAG 的内容（防翻译引擎前缀）
+                    remain = combine_kr.split(SPLIT_TITLE_TAG, 1)[1]
+                    # 按 SUMMARY_TAG 拆分 → 标题 和 剩余
+                    kr_title, remain2 = remain.split(SPLIT_SUMMARY_TAG, 1)
+                    kr_title = kr_title.strip()
+
+                    # 继续拆洞察（可能有也可能没有）
+                    if SPLIT_INSIGHT_TAG in remain2:
+                        kr_summary, kr_insight_part = remain2.split(SPLIT_INSIGHT_TAG, 1)
+                        kr_summary = kr_summary.strip()
+                        kr_insight = kr_insight_part.strip()
+                    else:
+                        # 没有 INSIGHT_TAG，剩余全是摘要
+                        kr_summary = remain2.strip()
+                        kr_insight = ""
+                elif SPLIT_TITLE_TAG in combine_kr:
+                    # 只有 TITLE_TAG，后面全算标题（异常情况）
+                    kr_title = combine_kr.split(SPLIT_TITLE_TAG, 1)[1].strip()
+                    kr_summary = ""
+                    kr_insight = ""
+                else:
+                    # 标记全部丢失，降级三次单独翻译
+                    print(f"  ⚠️ 三合一翻译标记丢失，降级三次单独翻译 | url={url[:50]}...")
+                    kr_title = translate_text(tc)
+                    kr_summary = translate_text(sc) if sc else ""
+                    kr_insight = translate_text(ic) if ic else ""
+
+            except Exception as e:
+                print(f"  ⚠️ 三合一翻译异常: {e}，降级三次单独翻译")
+                try:
+                    kr_title = translate_text(tc)
+                    kr_summary = translate_text(sc) if sc else ""
+                    kr_insight = translate_text(ic) if ic else ""
+                except Exception as e2:
+                    print(f"  降级翻译也失败: {e2}，使用原文")
+                    kr_title, kr_summary, kr_insight = tc, sc, ""
+
+            # 存储翻译结果，供 Excel 生成使用
             item['kr_title'] = kr_title
             item['kr_summary'] = kr_summary
-
-            # ---- AI 市场洞察(中) + 译韩 ----
-            ic = (item.get('insight') or "").strip()
-            kr_insight = ""
-            if ic:
-                try:
-                    kr_insight_raw = translate_text(ic)
-                    if kr_insight_raw and kr_insight_raw.strip():
-                        kr_insight = kr_insight_raw.strip()
-                except Exception as e:
-                    print(f"洞察翻译异常: {e}")
-                    kr_insight = ""
             item['kr_insight'] = kr_insight
+            # ===== 三合一翻译结束 =====
 
             # 摘要为空时隐藏摘要行（如 CFM 只抓标题不抓摘要）
             zh_summary_html = f'<div class="news-summary">{sc}</div>' if sc else ''
             kr_summary_html = f'<div class="news-summary">{kr_summary}</div>' if kr_summary else ''
-            zh_insight_html = f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span>{ic}</div>' if ic else ''
-            kr_insight_html = f'<div class="news-insight kr"><span class="insight-label">💡 시사점</span>{kr_insight}</div>' if kr_insight else ''
+            zh_insight_html = f'<div class="news-insight"><span class="insight-label">AI市场洞察</span>{ic}</div>' if ic else ''
+            kr_insight_html = f'<div class="news-insight kr"><span class="insight-label">AI시사점</span>{kr_insight}</div>' if kr_insight else ''
 
             html_parts.append(f'''
 <div class="news-item">
@@ -2481,9 +2516,11 @@ def _generate_excel(news_items, report_date):
             ws.write_rich_string(row, 0, *cn_segments, cn_base_fmt)
 
             # ---- 右列：韩文富文本 ----
+            # ===== 改动11-4：Excel 使用三合一翻译结果（kr_insight）=====
             kr_title = item.get('kr_title', '')
             kr_summary = item.get('kr_summary', '')
             kr_insight = item.get('kr_insight', '')
+
             kr_segments = []
             if kr_title:
                 kr_segments.extend([
@@ -2684,10 +2721,13 @@ def _generate_outlook_table_html(news_items, report_date):
             url = item.get('url', '')
             src = item.get('source', '')
             t_show = item['pub_time'].strftime('%Y-%m-%d %H:%M') if item.get('pub_time') else ''
+
+            # ===== 改动11-5：Outlook HTML 使用三合一翻译结果 =====
             kr_title = item.get('kr_title', '')
             kr_summary = item.get('kr_summary', '')
+            kr_insight = item.get('kr_insight', '')
+
             insight_cn = item.get('insight', '') or ''
-            kr_insight = item.get('kr_insight', '') or ''
 
             # HTML转义
             title_cn_esc = title_cn.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
@@ -2701,14 +2741,14 @@ def _generate_outlook_table_html(news_items, report_date):
             if summary_cn_esc:
                 cn_cell += f'<div class="news-summary">{summary_cn_esc}</div>'
             if insight_cn_esc:
-                cn_cell += f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span>{insight_cn_esc}</div>'
+                cn_cell += f'<div class="news-insight"><span class="insight-label">AI市场洞察</span>{insight_cn_esc}</div>'
             cn_cell += f'<div class="news-meta"><span class="source-tag">{src}</span> 🕐 {t_show}</div>'
 
             kr_cell = f'<div class="news-title"><a href="{url}">{kr_title_esc}</a></div>'
             if kr_summary_esc:
                 kr_cell += f'<div class="news-summary">{kr_summary_esc}</div>'
             if kr_insight_esc:
-                kr_cell += f'<div class="news-insight kr"><span class="insight-label">💡 시사점</span>{kr_insight_esc}</div>'
+                kr_cell += f'<div class="news-insight kr"><span class="insight-label">AI시사점</span>{kr_insight_esc}</div>'
 
             html_parts.append(f'''    <tr class="news-row">
         <td class="col-zh" style="width:340px; padding:10px 24px; vertical-align:top; background-color:#eef2f7; border-bottom:1px solid #eef1f3;">
@@ -2878,6 +2918,8 @@ def main():
     # 使用并行版过滤（改动点：15并发详情抓取）
     matched = filter_brand_news_parallel(all_news, hours=24)
     print(f"\n📊 匹配行业资讯总数：{len(matched)}")
+
+    # 品牌统计
     brand_stat = {}
     for item in matched:
         b = item['brand']
@@ -2885,7 +2927,11 @@ def main():
     for b in brand_order:
         print(f"  {b}：{brand_stat.get(b, 0)} 条")
 
-    print("\n🔤 开始批量翻译（标题+摘要合并调用，降低API次数）...")
+    # ===== 三合一翻译说明 =====
+    print(f"\n🔤 开始批量翻译（标题+摘要+洞察三合一，降低2/3 API调用）...")
+    translate_count_estimate = sum(1 for it in matched if it.get('insight')) + len(matched)
+    print(f"  预计节省 API 调用: ~{translate_count_estimate - len(matched)} 次")
+
     now = datetime.now()
     print(f"\n📝 开始生成HTML报告（{len(matched)}条匹配新闻）...")
     html_text = generate_html_report(matched, now)
