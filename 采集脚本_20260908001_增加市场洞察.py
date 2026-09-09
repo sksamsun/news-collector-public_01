@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-十四源行业新闻采集【并行优化版】
-优化清单（新增第10项并行优化）：
+十四源行业新闻采集【深度优化完整版】
+优化清单：
 1. 修复MIMEBase邮件参数错误，稳定发送
 2. 标题+摘要合并单次翻译，减少一半API请求，缓解限流
 3. 翻译渠道遇到429/请求超限自动休眠，降低QPS
@@ -11,7 +11,6 @@
 7. 邮件附件兼容标准RFC编码，解决163 SMTP 500语法报错
 8. 修复send_email缺少script_path参数，恢复脚本附件功能
 9. 原有404修复、URL拼接、敏感过滤、Selenium兼容全部保留
-10. 【新增】并行化处理：源站6并发、详情页15并发、翻译8并发，目标50分钟
 """
 import requests
 import sys
@@ -33,6 +32,7 @@ from functools import lru_cache
 import hashlib
 from urllib.parse import urljoin
 import signal, atexit
+# ===== 改动1：新增并行导入 =====
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import threading
@@ -113,17 +113,6 @@ try:
     HAS_SUMY = True
 except ImportError:
     HAS_SUMY = False
-
-# ==================== 并行化核心：线程局部 Session ====================
-_thread_local = threading.local()
-
-def get_thread_session():
-    """每个线程独立的 requests.Session，连接复用减少 TCP 握手"""
-    if not hasattr(_thread_local, 'session'):
-        s = requests.Session()
-        s.headers.update(get_random_header())
-        _thread_local.session = s
-    return _thread_local.session
 
 # ==================== 全局配置 ====================
 DEBUG_PRINT_ALL_HREF = False
@@ -344,44 +333,6 @@ def safe_request(url, timeout=30):
     print(f"请求彻底失败 {url}")
     return None
 
-# 【并行版】快速请求：用线程局部 Session + 更短 delay
-def safe_request_fast(url, timeout=30):
-    delay = random.uniform(PAGE_DELAY_MIN * 0.3, PAGE_DELAY_MAX * 0.6)
-    time.sleep(delay)
-    session = get_thread_session()
-    for retry in range(REQUEST_RETRY_TIMES + 1):
-        try:
-            resp = session.get(url, timeout=timeout)
-            resp.raise_for_status()
-            detected = resp.apparent_encoding
-            if detected and detected.lower() in ('utf-8', 'utf8', 'gbk', 'gb2312', 'gb18030', 'utf-8-sig'):
-                resp.encoding = detected
-            elif detected and detected.lower() in ('utf-8-sig',):
-                resp.encoding = 'utf-8'
-            else:
-                content_sample = resp.content[:4096]
-                meta_match = re.search(rb'charset[="\s]+([a-zA-Z0-9\-_]+)', content_sample, re.IGNORECASE)
-                if meta_match:
-                    try:
-                        charset = meta_match.group(1).decode('ascii').lower()
-                        if charset in ('utf-8', 'utf8', 'gbk', 'gb2312', 'gb18030', 'big5'):
-                            resp.encoding = charset
-                        else:
-                            resp.encoding = 'utf-8'
-                    except:
-                        resp.encoding = 'utf-8'
-                else:
-                    resp.encoding = 'utf-8'
-            return resp
-        except Exception as e:
-            err_code = getattr(getattr(e, 'response', None), 'status_code', 0)
-            if 400 <= err_code < 500:
-                return None
-            if retry < REQUEST_RETRY_TIMES:
-                time.sleep(random.uniform(0.3, 0.8))
-            continue
-    return None
-
 # Selenium驱动
 def get_selenium_driver():
     chrome_options = Options()
@@ -402,7 +353,7 @@ def get_selenium_driver():
     return driver
 
 # 翻译入口缓存 + 限流自动休眠 + 超时保护
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=2048)
 def translate_text(text: str) -> str:
     text = text.strip()
     if not text:
@@ -1817,11 +1768,13 @@ for src_name in ["网易新闻", "新浪首页", "新浪新闻频道", "新浪�
                  "科创板日报", "经济观察网", "ZOL科技新闻", "搜狐科技", "凤凰科技", "太平洋科技网"]:
     DETAIL_MAP[src_name] = _make_detail_func(src_name)
 
-# 【并行版】过滤匹配新闻
+# 过滤匹配新闻（双重时间检查：列表页预过滤 + 详情页确认）
+# ===== 改动2：新增并行版过滤函数 =====
 def filter_brand_news_parallel(raw_all_list, hours=24):
     clean_news_list = []
     drop_sensitive = 0
     drop_ascii_only = 0
+    # 纯数字/英文字母/标点符号标题的正则
     ascii_only_pattern = re.compile(r'^[a-zA-Z0-9\s\.\,\-\+\/\(\)\[\]\{\}\:\;\!\?\@\#\$\%\^\&\*\_\=\~\`\'\"\\\|<>]+$')
     for item in raw_all_list:
         title = item['title']
@@ -1842,7 +1795,6 @@ def filter_brand_news_parallel(raw_all_list, hours=24):
     matched_news = []
     time_skipped_list = 0
     time_skipped_detail = 0
-    detail_fetched = 0
     processed = 0
     
     # 先品牌预过滤，减少并行时的无效请求
@@ -1868,7 +1820,6 @@ def filter_brand_news_parallel(raw_all_list, hours=24):
     _progress = [0, len(brand_candidates), 0]
     
     def _process_one(item):
-        nonlocal time_skipped_list, time_skipped_detail, detail_fetched
         title = item['title']
         url = item['url']
         source = item['source']
@@ -1885,7 +1836,7 @@ def filter_brand_news_parallel(raw_all_list, hours=24):
         if list_time is not None and list_time < cutoff_time:
             return ('TIME_SKIP', None)
         
-        # 品牌计数上限（非严格但可接受）
+        # 品牌计数上限
         cnt = brand_count.get(match_brand, 0)
         if cnt >= 500:
             return None
@@ -1905,9 +1856,6 @@ def filter_brand_news_parallel(raw_all_list, hours=24):
         except Exception:
             return None
         
-        with _prog_lock:
-            brand_count[match_brand] = brand_count.get(match_brand, 0) + 1
-        
         if detail_title:
             title = detail_title
         
@@ -1915,6 +1863,8 @@ def filter_brand_news_parallel(raw_all_list, hours=24):
         final_time = pt if pt else list_time
         if final_time is None or final_time < cutoff_time:
             return ('TIME_SKIP_DETAIL', None)
+        
+        brand_count[match_brand] = brand_count.get(match_brand, 0) + 1
         
         # 生成AI洞察
         insight = ""
@@ -1955,8 +1905,8 @@ def filter_brand_news_parallel(raw_all_list, hours=24):
     matched_news.sort(key=lambda x: x['pub_time'] if x['pub_time'] else datetime.min, reverse=True)
     return matched_news
 
-# ==================== 生成HTML报告【并行翻译预处理】 ====================
-def generate_html_report_parallel(news_items, report_date):
+# 生成HTML报告【合并标题摘要单次翻译，减少API请求】
+def generate_html_report(news_items, report_date):
     brand_groups = {}
     for item in news_items:
         b = item['brand']
@@ -2285,69 +2235,6 @@ def generate_html_report_parallel(news_items, report_date):
 <!-- 内容主体 -->
 <div class="content">
 ''')
-    
-    # ====== 并行翻译预处理（核心改动）======
-    _trans_tasks = []
-    for b in brand_order:
-        if b not in brand_groups:
-            continue
-        for idx, item in enumerate(brand_groups[b]):
-            tc = item['title']
-            sc = item.get('summary', '') or ''
-            combine = f"{SPLIT_TITLE_TAG}{tc}{SPLIT_SUMMARY_TAG}{sc}"
-            _trans_tasks.append((b, idx, 'combined', combine))
-            
-            ic = item.get('insight', '')
-            if ic:
-                _trans_tasks.append((b, idx, 'insight', ic))
-    
-    # 去重
-    _unique_texts = {}
-    for b, idx, ttype, text in _trans_tasks:
-        if text not in _unique_texts:
-            _unique_texts[text] = []
-        _unique_texts[text].append((b, idx, ttype))
-    
-    print(f"\n🌐 并行翻译预处理：{len(_trans_tasks)}字段 → {len(_unique_texts)}唯一文本，8并发")
-    
-    _trans_results = {}
-    def _do_translate(text):
-        try:
-            return translate_text(text)
-        except Exception:
-            return text
-    
-    t0 = time.time()
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(_do_translate, text): text for text in _unique_texts}
-        for future in as_completed(futures):
-            text = futures[future]
-            try:
-                _trans_results[text] = future.result(timeout=120)
-            except Exception:
-                _trans_results[text] = text
-    
-    print(f"⏱ 翻译并行完成: {time.time()-t0:.1f}s")
-    
-    # 写回翻译结果
-    for text, destinations in _unique_texts.items():
-        translated = _trans_results.get(text, text)
-        for b, idx, ttype in destinations:
-            item = brand_groups[b][idx]
-            if ttype == 'combined':
-                if SPLIT_SUMMARY_TAG in translated and SPLIT_TITLE_TAG in translated:
-                    parts = translated.split(SPLIT_SUMMARY_TAG, 1)
-                    kt = parts[0].replace(SPLIT_TITLE_TAG, "").strip()
-                    ks = parts[1].strip() if len(parts) > 1 else ""
-                else:
-                    kt = translated[:len(item['title'])*2]
-                    ks = translated[len(item['title'])*2:].strip()
-                item['kr_title'] = kt
-                item['kr_summary'] = ks
-            else:
-                item['kr_insight'] = translated.strip()
-    # ====== 并行翻译结束 ======
-    
     for b in brand_order:
         if b not in brand_groups:
             continue
@@ -2368,13 +2255,42 @@ def generate_html_report_parallel(news_items, report_date):
             url = item['url']
             t_show = item['pub_time'].strftime('%Y-%m-%d %H:%M') if item['pub_time'] else "时间未知"
 
-            # 直接使用预翻译结果
-            kr_title = item.get('kr_title', tc)
-            kr_summary = item.get('kr_summary', sc)
-            kr_insight = item.get('kr_insight', '')
+            # 翻译带异常保护，单条失败不影响后续
+            try:
+                # 合并标题+摘要，一次翻译，减少API调用
+                combine_text = f"{SPLIT_TITLE_TAG}{tc}{SPLIT_SUMMARY_TAG}{sc}"
+                combine_kr = translate_text(combine_text)
+                if SPLIT_TITLE_TAG in combine_kr and SPLIT_SUMMARY_TAG in combine_kr:
+                    kr_title, kr_summary = combine_kr.split(SPLIT_SUMMARY_TAG, 1)
+                    kr_title = kr_title.replace(SPLIT_TITLE_TAG, "").strip()
+                    kr_summary = kr_summary.strip()
+                else:
+                    # 分割标记丢失，降级两次翻译
+                    kr_title = translate_text(tc)
+                    kr_summary = translate_text(sc)
+            except Exception as e:
+                print(f"翻译单条异常: {e}，使用原文")
+                kr_title = tc
+                kr_summary = sc
 
-            ic = item.get('insight', '')
+            # 存储翻译结果，供Excel生成使用
+            item['kr_title'] = kr_title
+            item['kr_summary'] = kr_summary
 
+            # ---- AI 市场洞察(中) + 译韩 ----
+            ic = (item.get('insight') or "").strip()
+            kr_insight = ""
+            if ic:
+                try:
+                    kr_insight_raw = translate_text(ic)
+                    if kr_insight_raw and kr_insight_raw.strip():
+                        kr_insight = kr_insight_raw.strip()
+                except Exception as e:
+                    print(f"洞察翻译异常: {e}")
+                    kr_insight = ""
+            item['kr_insight'] = kr_insight
+
+            # 摘要为空时隐藏摘要行（如 CFM 只抓标题不抓摘要）
             zh_summary_html = f'<div class="news-summary">{sc}</div>' if sc else ''
             kr_summary_html = f'<div class="news-summary">{kr_summary}</div>' if kr_summary else ''
             zh_insight_html = f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span>{ic}</div>' if ic else ''
@@ -2896,11 +2812,12 @@ def send_email(html_content, report_date, script_path=None, item_count=0, news_i
         return False
 
 
-# 主程序【并行优化版：全局URL去重 + 时间严格过滤 + 详情深度抓取】
+# 主程序【全局URL去重 + 时间严格过滤 + 详情深度抓取】
+# ===== 改动3：main函数改为并行抓取源站 + 并行详情过滤 =====
 def main():
     SCRIPT_START_TIME = datetime.now()
     print("="*72)
-    print("十四源行业新闻采集【并行优化完整版】")
+    print("十四源行业新闻采集【并行优化版 - 最小改动】")
     print(f"脚本执行时间：{SCRIPT_START_TIME.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"时间窗口：24小时（{ (SCRIPT_START_TIME - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')} ~ {SCRIPT_START_TIME.strftime('%Y-%m-%d %H:%M:%S')}）")
     print("="*72)
@@ -2957,7 +2874,7 @@ def main():
         print("❌ 所有站点无新闻，程序退出")
         return
 
-    # 使用并行版过滤
+    # 使用并行版过滤（改动点：15并发详情抓取）
     matched = filter_brand_news_parallel(all_news, hours=24)
     print(f"\n📊 匹配行业资讯总数：{len(matched)}")
     brand_stat = {}
@@ -2967,12 +2884,10 @@ def main():
     for b in brand_order:
         print(f"  {b}：{brand_stat.get(b, 0)} 条")
 
-    print("\n🚀 翻译已在并行预处理中完成，直接生成报告...")
-    
-    # 使用并行版HTML生成（内含并行翻译）
+    print("\n🔤 开始批量翻译（标题+摘要合并调用，降低API次数）...")
     now = datetime.now()
     print(f"\n📝 开始生成HTML报告（{len(matched)}条匹配新闻）...")
-    html_text = generate_html_report_parallel(matched, now)
+    html_text = generate_html_report(matched, now)
     file_name = f'South China Sales Daily MI Briefing_{now.strftime("%Y%m%d_%H%M%S")}.html'
     save_full = os.path.join(OUTPUT_DIR, file_name)
     with open(save_full, 'w', encoding='utf-8') as f:
@@ -2982,12 +2897,9 @@ def main():
     print("\n📧 执行邮件发送...")
     print(f"📄 报告文件：{save_full}")
     # 携带脚本参数，自动附加当前py文件
-    email_ok = send_email(html_text, now, script_path=__file__, item_count=len(matched), news_items=matched)
+    email_ok = send_email(html_content, now, script_path=__file__, item_count=len(matched), news_items=matched)
     
-    total = (datetime.now() - SCRIPT_START_TIME).total_seconds()
-    print(f"\n{'='*72}")
-    print(f"✅ 全部任务执行完毕！总耗时: {total/60:.1f} 分钟")
-    print(f"{'='*72}")
+    print("\n✅ 全部任务执行完毕！")
 
 if __name__ == "__main__":
     # 启动时写锁文件（写 Python 自身 PID，方便外层 shell 检测）
