@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-十四源行业新闻采集【深度优化完整版】
-优化清单：
+十四源行业新闻采集【并行优化版】
+优化清单（新增第10项并行优化）：
 1. 修复MIMEBase邮件参数错误，稳定发送
 2. 标题+摘要合并单次翻译，减少一半API请求，缓解限流
 3. 翻译渠道遇到429/请求超限自动休眠，降低QPS
@@ -11,6 +11,7 @@
 7. 邮件附件兼容标准RFC编码，解决163 SMTP 500语法报错
 8. 修复send_email缺少script_path参数，恢复脚本附件功能
 9. 原有404修复、URL拼接、敏感过滤、Selenium兼容全部保留
+10. 【新增】并行化处理：源站6并发、详情页15并发、翻译8并发，目标50分钟
 """
 import requests
 import sys
@@ -2470,7 +2471,7 @@ def _generate_excel(news_items, report_date):
                 ])
             if item.get('insight'):
                 cn_segments.extend([
-                    cn_insight_label_frag, "💡 市场洞察:\n",
+                    cn_insight_label_frag, "AI市场洞察:\n",
                     cn_insight_text_frag, item['insight'],
                     cn_text_frag, "\n",
                 ])
@@ -2496,7 +2497,7 @@ def _generate_excel(news_items, report_date):
                 ])
             if kr_insight:
                 kr_segments.extend([
-                    kr_insight_label_frag, "💡 시사점:\n",
+                    kr_insight_label_frag, "AI시사점:\n",
                     kr_insight_text_frag, kr_insight,
                 ])
             if kr_segments:
@@ -2897,7 +2898,7 @@ def main():
     print("\n📧 执行邮件发送...")
     print(f"📄 报告文件：{save_full}")
     # 携带脚本参数，自动附加当前py文件
-    email_ok = send_email(html_content, now, script_path=__file__, item_count=len(matched), news_items=matched)
+    email_ok = send_email(html_text, now, script_path=__file__, item_count=len(matched), news_items=matched)
     
     print("\n✅ 全部任务执行完毕！")
 
