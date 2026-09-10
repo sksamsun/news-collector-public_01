@@ -13,7 +13,6 @@
 9. 原有404修复、URL拼接、敏感过滤、Selenium兼容全部保留
 10. 【新增】并行化处理：源站6并发、详情页15并发、翻译8并发，目标50分钟
 11. 【修正】AI洞察单层3次重试，超时递进25s→40s→40s，不用极简降级文本填充
-12. 【修正】市场洞察标签与内容换行显示，增强可读性
 """
 import requests
 import sys
@@ -2146,26 +2145,18 @@ def generate_html_report(news_items, report_date):
         line-height: 1.6;
         margin-top: 4px;
     }}
-    /* 【修改】AI 市场洞察：标签与内容分行显示 */
+    /* AI 市场洞察(与摘要同格式:左对齐、无背景) */
     .news-insight {{
         font-size: 12px;
         color: var(--text-secondary);
         line-height: 1.6;
-        margin-top: 8px;
-        padding: 8px 12px;
-        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-        border-radius: 6px;
-        border-left: 3px solid var(--accent);
+        margin-top: 4px;
     }}
     .insight-label {{
         display: block;
         font-weight: 700;
-        color: var(--primary);
-        margin-bottom: 6px;
-        font-size: 13px;
-    }}
-    .insight-content {{
-        display: block;
+        color: var(--text-secondary);
+        margin-bottom: 2px;
     }}
     .news-meta {{
         display: flex;
@@ -2320,13 +2311,11 @@ def generate_html_report(news_items, report_date):
                     kr_insight = ""
             item['kr_insight'] = kr_insight
 
-            # 【修改】摘要为空时隐藏摘要行
+            # 摘要为空时隐藏摘要行（如 CFM 只抓标题不抓摘要）
             zh_summary_html = f'<div class="news-summary">{sc}</div>' if sc else ''
             kr_summary_html = f'<div class="news-summary">{kr_summary}</div>' if kr_summary else ''
-            
-            # 【修改】市场洞察使用新格式：标签与内容分行，带背景高亮
-            zh_insight_html = f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span><span class="insight-content">{ic}</span></div>' if ic else ''
-            kr_insight_html = f'<div class="news-insight kr"><span class="insight-label">💡 시사점</span><span class="insight-content">{kr_insight}</span></div>' if kr_insight else ''
+            zh_insight_html = f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span>{ic}</div>' if ic else ''
+            kr_insight_html = f'<div class="news-insight kr"><span class="insight-label">💡 시사점</span>{kr_insight}</div>' if kr_insight else ''
 
             html_parts.append(f'''
 <div class="news-item">
@@ -2656,22 +2645,16 @@ def _generate_outlook_table_html(news_items, report_date):
         font-size: 10px; margin-right: 6px;
     }}
 
-    /* 【修改】AI 市场洞察：Outlook中使用表格行来分隔标签和内容 */
+    /* AI 市场洞察(与摘要同格式:左对齐、无背景) */
     .news-insight {{
         font-size: 11px; color: #636e72; line-height: 1.6;
         margin-bottom: 4px;
-        padding: 6px 8px;
-        background-color: #f8f9fa;
-        border-left: 3px solid #c9a96e;
     }}
     .insight-label {{
         display: block;
         font-weight: 700;
-        color: #1a2332;
-        margin-bottom: 4px;
-    }}
-    .insight-content {{
-        display: block;
+        color: #636e72;
+        margin-bottom: 2px;
     }}
 
     /* 页脚 */
@@ -2737,20 +2720,15 @@ def _generate_outlook_table_html(news_items, report_date):
             cn_cell = f'<div class="news-title"><a href="{url}">{title_cn_esc}</a></div>'
             if summary_cn_esc:
                 cn_cell += f'<div class="news-summary">{summary_cn_esc}</div>'
-            
-            # 【修改】市场洞察使用新格式：标签与内容分行
             if insight_cn_esc:
-                cn_cell += f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span><span class="insight-content">{insight_cn_esc}</span></div>'
-            
+				cn_cell += f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span><br>{insight_cn_esc}</div>'
             cn_cell += f'<div class="news-meta"><span class="source-tag">{src}</span> 🕐 {t_show}</div>'
 
             kr_cell = f'<div class="news-title"><a href="{url}">{kr_title_esc}</a></div>'
             if kr_summary_esc:
                 kr_cell += f'<div class="news-summary">{kr_summary_esc}</div>'
-            
-            # 【修改】韩文市场洞察同样分行
             if kr_insight_esc:
-                kr_cell += f'<div class="news-insight kr"><span class="insight-label">💡 시사점</span><span class="insight-content">{kr_insight_esc}</span></div>'
+				kr_cell += f'<div class="news-insight kr"><span class="insight-label">💡 시사점</span><br>{kr_insight_esc}</div>'
 
             html_parts.append(f'''    <tr class="news-row">
         <td class="col-zh" style="width:340px; padding:10px 24px; vertical-align:top; background-color:#eef2f7; border-bottom:1px solid #eef1f3;">
