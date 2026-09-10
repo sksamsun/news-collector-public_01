@@ -2150,13 +2150,15 @@ def generate_html_report(news_items, report_date):
         font-size: 12px;
         color: var(--text-secondary);
         line-height: 1.6;
-        margin-top: 4px;
+        margin-top: 6px;
+		padding-top: 4px;
+        border-top: 1px dotted var(--border-light);
     }}
     .insight-label {{
-        display: block;
         font-weight: 700;
         color: var(--text-secondary);
-        margin-bottom: 2px;
+        margin-bottom: 4px;
+		display: block;
     }}
     .news-meta {{
         display: flex;
@@ -2314,8 +2316,9 @@ def generate_html_report(news_items, report_date):
             # 摘要为空时隐藏摘要行（如 CFM 只抓标题不抓摘要）
             zh_summary_html = f'<div class="news-summary">{sc}</div>' if sc else ''
             kr_summary_html = f'<div class="news-summary">{kr_summary}</div>' if kr_summary else ''
-            zh_insight_html = f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span><br>{ic}</div>' if ic else ''
-			kr_insight_html = f'<div class="news-insight kr"><span class="insight-label">💡 시사점</span><br>{kr_insight}</div>' if kr_insight else ''
+            # 【修复】使用 <div> 替代 <span> 并添加内联样式，确保Outlook兼容换行
+            zh_insight_html = f'<div class="news-insight"><div class="insight-label" style="font-weight:700;color:#636e72;margin-bottom:4px;display:block;">💡 市场洞察</div><div>{ic}</div></div>' if ic else ''
+            kr_insight_html = f'<div class="news-insight kr"><div class="insight-label" style="font-weight:700;color:#636e72;margin-bottom:4px;display:block;">💡 시사점</div><div>{kr_insight}</div></div>' if kr_insight else ''
 
             html_parts.append(f'''
 <div class="news-item">
@@ -2491,7 +2494,7 @@ def _generate_excel(news_items, report_date):
                 ])
             if item.get('insight'):
                 cn_segments.extend([
-                    cn_insight_label_frag, "💡AI 市场洞察:\n",
+                    cn_insight_label_frag, "AI市场洞察:\n",
                     cn_insight_text_frag, item['insight'],
                     cn_text_frag, "\n",
                 ])
@@ -2517,7 +2520,7 @@ def _generate_excel(news_items, report_date):
                 ])
             if kr_insight:
                 kr_segments.extend([
-                    kr_insight_label_frag, "💡AI 시사점:\n",
+                    kr_insight_label_frag, "AI시사점:\n",
                     kr_insight_text_frag, kr_insight,
                 ])
             if kr_segments:
@@ -2721,14 +2724,15 @@ def _generate_outlook_table_html(news_items, report_date):
             if summary_cn_esc:
                 cn_cell += f'<div class="news-summary">{summary_cn_esc}</div>'
             if insight_cn_esc:
-				cn_cell += f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span><br>{insight_cn_esc}</div>'
-            cn_cell += f'<div class="news-meta"><span class="source-tag">{src}</span> 🕐 {t_show}</div>'
+				# 【修复】使用 <div> + 内联样式替代 <span>，确保Outlook兼容换行
+                cn_cell += f'<div class="news-insight" style="font-size:11px;color:#636e72;line-height:1.6;margin-top:4px;margin-bottom:4px;"><div style="font-weight:700;color:#636e72;margin-bottom:4px;">💡 市场洞察</div><div>{insight_cn_esc}</div></div>'
+                cn_cell += f'<div class="news-meta"><span class="source-tag">{src}</span> 🕐 {t_show}</div>'
 
             kr_cell = f'<div class="news-title"><a href="{url}">{kr_title_esc}</a></div>'
             if kr_summary_esc:
                 kr_cell += f'<div class="news-summary">{kr_summary_esc}</div>'
             if kr_insight_esc:
-				kr_cell += f'<div class="news-insight kr"><span class="insight-label">💡 시사점</span><br>{kr_insight_esc}</div>'
+                kr_cell += f'<div class="news-insight kr" style="font-size:11px;color:#636e72;line-height:1.6;margin-top:4px;margin-bottom:4px;"><div style="font-weight:700;color:#636e72;margin-bottom:4px;">💡 시사점</div><div>{kr_insight_esc}</div></div>'
 
             html_parts.append(f'''    <tr class="news-row">
         <td class="col-zh" style="width:340px; padding:10px 24px; vertical-align:top; background-color:#eef2f7; border-bottom:1px solid #eef1f3;">
