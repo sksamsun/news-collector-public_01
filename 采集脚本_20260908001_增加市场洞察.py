@@ -2314,8 +2314,8 @@ def generate_html_report(news_items, report_date):
             # 摘要为空时隐藏摘要行（如 CFM 只抓标题不抓摘要）
             zh_summary_html = f'<div class="news-summary">{sc}</div>' if sc else ''
             kr_summary_html = f'<div class="news-summary">{kr_summary}</div>' if kr_summary else ''
-            zh_insight_html = f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span>{ic}</div>' if ic else ''
-            kr_insight_html = f'<div class="news-insight kr"><span class="insight-label">💡 시사점</span>{kr_insight}</div>' if kr_insight else ''
+            zh_insight_html = f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span><br>{ic}</div>' if ic else ''
+			kr_insight_html = f'<div class="news-insight kr"><span class="insight-label">💡 시사점</span><br>{kr_insight}</div>' if kr_insight else ''
 
             html_parts.append(f'''
 <div class="news-item">
