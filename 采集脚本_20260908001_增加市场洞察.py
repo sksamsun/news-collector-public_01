@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-十四源行业新闻采集【并行优化版 - v2.1 强制市场洞察版】
+十四源行业新闻采集【并行优化版】
 优化清单（新增第10项并行优化）：
 1. 修复MIMEBase邮件参数错误，稳定发送
 2. 标题+摘要合并单次翻译，减少一半API请求，缓解限流
@@ -12,7 +12,7 @@
 8. 修复send_email缺少script_path参数，恢复脚本附件功能
 9. 原有404修复、URL拼接、敏感过滤、Selenium兼容全部保留
 10. 【新增】并行化处理：源站6并发、详情页15并发、翻译8并发，目标50分钟
-11. 【v2.1】强制市场洞察：每条新闻必须包含AI市场洞察（中文+韩文），AI失败时用规则兜底，绝不空缺
+11. 【修正】AI洞察单层3次重试，超时递进25s→40s→40s，不用极简降级文本填充
 """
 import requests
 import sys
@@ -99,7 +99,6 @@ class TranslationTimeoutError(Exception):
 
 def timeout_handler(signum, frame):
     raise TranslationTimeoutError(f"翻译超时（{TRANSLATE_TIMEOUT}s）")
-
 # 智能摘要（textrank4zh 中文专用 + sumy 通用降级）
 try:
     from textrank4zh import TextRank4Keyword, TextRank4Sentence
@@ -170,19 +169,20 @@ AI_SUMMARY_PROMPT = """你是一位半导体/手机/汽车/科技行业分析师
 新闻标题：{title}
 新闻正文：{body}"""
 
-# ==================== 智谱AI市场洞察配置 ====================
-# 在摘要之外再补一段 150 字左右的"AI 市场洞察"，关注行业影响、产业链、竞争格局
+# ==================== 智谱AI市场洞察配置【最终版：单层3次重试】 ====================
 AI_INSIGHT_ENABLED = True
 AI_INSIGHT_MODEL = "glm-4-flash"
 AI_INSIGHT_MAX_TOKENS = 320
-AI_INSIGHT_TIMEOUT = 18
-AI_INSIGHT_MIN_CHARS = 100   # 【降低】最终输出字数下限，兜底内容通常较短
-AI_INSIGHT_TARGET_CHARS = 150  # 目标字数
-AI_INSIGHT_MAX_CHARS = 200   # 上限,避免冗长
-AI_INSIGHT_RATE_LIMIT = 0.8  # 略低于摘要,避免触发智谱 QPS 限额
+AI_INSIGHT_TIMEOUT = 25           # 首次超时25s
+AI_INSIGHT_RETRY_TIMEOUT = 40     # 重试超时40s（更长）
+AI_INSIGHT_MAX_RETRIES = 2        # 失败后再试2次，共3次确定
+AI_INSIGHT_MIN_CHARS = 150
+AI_INSIGHT_TARGET_CHARS = 150
+AI_INSIGHT_MAX_CHARS = 200
+AI_INSIGHT_RATE_LIMIT = 1.0       # 调用间隔
 
 AI_INSIGHT_PROMPT = """你是一位资深半导体/手机/汽车行业分析师，擅长从单一事件推断产业链与竞争格局变化。
-请基于以下新闻，用中文写一段 100-160字 的"市场洞察"短文。
+请基于以下新闻，用中文写一段 130-160字 的"市场洞察"短文。
 要求：
 1. 视角：聚焦"对相关品牌、产业链上下游、竞品、市场格局的潜在影响"
 2. 允许适度推断(基于行业常识)，但不要编造未提及的数据
@@ -193,169 +193,6 @@ AI_INSIGHT_PROMPT = """你是一位资深半导体/手机/汽车行业分析师�
 新闻正文：{body}
 相关品牌：{brand}
 """
-
-# ==================== 【v2.1新增】强制市场洞察兜底模板库 ====================
-# 当AI完全失效时，基于品牌+关键词生成有实质内容的兜底洞察
-_INSIGHT_TEMPLATES = {
-    'OPPO': {
-        'keywords': ['Find', 'Reno', '折叠', '影像', '充电', 'AI', 'ColorOS', '海外', '印度', '欧洲', '发布', '预约', '预售'],
-        'templates': [
-            "OPPO {event}信号明确，意在巩固中高端影像旗舰阵地。自研芯片与哈苏合作的持续投入，或强化其差异化壁垒；需关注竞品同期动作对渠道资源的争夺，以及供应链成本波动对定价策略的牵制。",
-            "从{event}可见OPPO正加速技术下放与区域渗透。折叠屏及AI功能的迭代节奏将考验其供应链协同能力，同时需防范东南亚等海外市场价格战对利润表的侵蚀。",
-            "OPPO此次{event}反映出对线下渠道精英机型占比提升的诉求。传感器、屏幕等核心器件国产化替代进度，将直接影响其成本控制与交付稳定性。"
-        ]
-    },
-    'vivo': {
-        'keywords': ['X系列', 'S系列', '天玑', '蔡司', '影像', '系统', 'AI', '折叠', '海外'],
-        'templates': [
-            "vivo {event}延续其在影像与设计赛道的聚焦策略。天玑旗舰平台的深度联调及蔡司光学持续背书，或支撑其高端ASP上行；需关注SoC独家供应协议对产能弹性的约束。",
-            "{event}显示vivo正加码系统级AI与跨端生态。OriginOS的用户粘性转化效率，以及自研影像芯片V系列的成本摊薄节奏，将是决定其毛利率修复的关键变量。",
-            "从{event}判断，vivo在巩固国内基本盘的同时，南亚及欧洲渠道的精细化运营能力面临考验，汇率与地缘政治成本需纳入区域定价模型。"
-        ]
-    },
-    '荣耀': {
-        'keywords': ['Magic', '折叠', '信号', '卫星', 'AI', '眼动', '西藏', '海外', '欧洲', '中东'],
-        'templates': [
-            "荣耀{event}凸显其独立后在折叠屏与卫星通信领域的快速卡位。硅碳负极电池及青海湖技术的规模商用进度，将决定其产品溢价能力与用户口碑转化率。",
-            "从{event}看，荣耀意在打破华为系替代标签，构建自有技术IP。渠道端需观察其线上线下价格体系管控力度，以及对经销商返利政策的可持续性。",
-            "荣耀此次{event}反映出对海外高端市场突破的急迫性。GMS生态适配与品牌认知重建仍需时间，短期更需倚重国内政商及礼品渠道的出货稳定性。"
-        ]
-    },
-    '传音': {
-        'keywords': ['TECNO', 'Infinix', 'itel', '非洲', '拉美', '印度', '中东', '业绩', '出货', '智能机', '功能机', '折叠'],
-        'templates': [
-            "传音{event}印证其在新兴市场多品牌矩阵运营的成熟度。本土化渠道深耕与财务分期模式的复制能力，是其维持出货量头部的核心壁垒；需关注各国货币贬值对回款周期的拖累。",
-            "从{event}可见，传音正尝试从功能机基本盘向智能机及高端机型要利润。供应链垂直整合（如自研算法、本地组装）的进度，将直接影响其ASP提升斜率与毛利修复节奏。",
-            "传音此次{event}释放出发力拉美及中东第二曲线的信号。汇款路径稳定性、本地售后体系建设进度，以及竞品在电商渠道的补贴力度，是评估其扩张质量的关键维度。"
-        ]
-    },
-    '手机市场': {
-        'keywords': ['出货', '销量', '份额', 'IDC', 'Canalys', 'Counterpoint', 'Counter Point', 'Q1', 'Q2', 'Q3', 'Q4', '季度', '同比', '环比', '5G', '折叠屏', 'AI手机'],
-        'templates': [
-            "手机市场{event}折射出存量竞争下换机周期的持续拉长。品牌集中度进一步提升的背景下，尾部厂商面临渠道收缩与库存减值双重压力，而头部玩家则需以AI与服务收入寻找新增长极。",
-            "从{event}看，高端化与折叠屏仍是当前为数不多的结构性增量。面板、铰链等关键器件成本下探速度，以及运营商补贴政策的边际变化，将直接影响高端渗透率曲线的斜率。",
-            "此次{event}提示需关注区域市场的地缘政治与汇率波动风险。印度及东南亚本土保护政策趋严，对中国品牌的产能布局、数据合规及本地化率提出了更高要求。"
-        ]
-    },
-    '腾讯': {
-        'keywords': ['微信', '游戏', '云', 'AI', '混元', '视频号', '广告', '监管', '反垄断', '出海'],
-        'templates': [
-            "腾讯{event}体现其从C端流量变现向B端产业数字化延伸的战略定力。微信生态的交易GMV与广告加载率仍有提升空间，但需平衡用户体验与商业化的长期关系。",
-            "从{event}可见，腾讯在游戏出海及自研引擎投入上持续加码。版号政策常态化后，国内游戏市场景气度修复与新游Pipeline的集中度，是支撑其估值修复的核心变量。",
-            "此次{event}反映出腾讯对AI大模型在广告、云及办公场景落地的急迫性。混元大模型的商业化节奏与推理成本曲线，将决定其在企业级市场追赶竞品的窗口期长度。"
-        ]
-    },
-    '比亚迪': {
-        'keywords': ['销量', '秦', '汉', '唐', '海豹', '仰望', '腾势', '出海', '欧洲', '巴西', '泰国', '电池', '刀片', '智驾', '三电'],
-        'templates': [
-            "比亚迪{event}印证其垂直整合模式在成本控制与快速迭代上的优势。碳酸锂价格波动及智驾系统自研进度，是影响其高端车型利润率与品牌溢价能力的关键变量。",
-            "从{event}看，比亚迪海外建厂与本地化供应链布局正在加速。欧盟关税政策、反补贴调查动态及本地化率要求，将直接考验其出海盈利模型的可持续性。",
-            "此次{event}显示比亚迪在智能化补课上的投入力度。高速及城市NOA的落地节奏、芯片国产化替代进度，以及软件服务商业模式的清晰度，是其下一阶段估值切换的核心看点。"
-        ]
-    },
-    '小鹏': {
-        'keywords': ['G6', 'G9', 'P7', 'XNGP', '智驾', 'MONA', '大众', '合作', '飞行汽车', '出海'],
-        'templates': [
-            "小鹏{event}凸显其在智能驾驶领域的长期主义投入。XNGP城市覆盖进度与硬件BOM成本下探，是影响其毛利率转正节奏的关键；大众合作的技术变现能力亦需时间验证。",
-            "从{事件}可见，小鹏MONA系列的推出意在以性价比车型扩大数据飞轮规模。低价策略对品牌调性的稀释风险，以及经销商网络扩张带来的现金流压力，需持续跟踪。",
-            "此次{event}反映出小鹏在技术品牌传播上的差异化尝试。飞行汽车及机器人业务的资本开支需求，可能对其主业研发投入及盈利预期形成阶段性博弈焦点。"
-        ]
-    },
-    '江波龙': {
-        'keywords': ['FORESEE', 'Lexar', '雷克沙', '存储', '车规', '工规', 'eMMC', 'SSD', '企业级', '信创', '国产'],
-        'templates': [
-            "江波龙{event}显示其在消费级Lexar品牌与企业级FORESEE双轮驱动上的深化。车规及工规存储的认证进度，是打开高毛利增量市场的关键壁垒，需关注AEC-Q100等资质获取节奏。",
-            "从{event}看，江波龙正受益于信创及服务器国产化替代浪潮。主控芯片自研与封测产能配套进度，将决定其能否从模组商向解决方案商升级，从而提升价值链位置。",
-            "此次{event}提示需关注存储周期波动对存货跌价准备的影响。NAND/DRAM现货价格走势、下游消费电子及汽车电子需求复苏斜率，是其短期业绩弹性的核心驱动。"
-        ]
-    },
-    '长鑫': {
-        'keywords': ['DRAM', 'LPDDR', '合肥', '北京', '国产', '光刻', '设备', '产能', '良率'],
-        'templates': [
-            "长鑫{event}标志着国产DRAM自主可控进程再进一步。先进制程导入及设备材料国产化替代进度，是突破海外技术封锁、实现成本竞争力并进入主流供应链的核心变量。",
-            "从{event}可见，长鑫在AI及车规等高附加值场景的验证进展值得关注。下游模组厂及终端品牌的导入意愿与批次稳定性数据，是决定其市场份额提升斜率的关键指标。",
-            "此次{event}反映出存储国产化对区域供应链安全的战略意义。美国出口管制动态、日本及荷兰设备许可审批节奏，仍将是悬于其产能扩张头顶的不确定性因素。"
-        ]
-    },
-    '长存': {
-        'keywords': ['YMTC', '长江存储', 'NAND', '闪存', 'Xtacking', '晶栈', '国产', '232层', 'PCIe'],
-        'templates': [
-            "长存{event}印证其在Xtacking架构及高端NAND堆叠技术上的追赶速度。设备受限背景下，良率提升与产能爬坡效率，是其能否在消费级及企业级SSD市场扩大替代空间的关键。",
-            "从{event}看，长存正积极拓展在数据中心及企业级存储市场的认证边界。与主控厂、模组厂的适配进度，以及信创政策对国产颗粒采购比例的指引，是市场关注焦点。",
-            "此次{event}提示存储国产化已进入深度攻坚期。美国BIS实体清单变动、日韩设备商的合规策略调整，以及国内设备材料替代方案的成熟度，将长期影响其扩产节奏。"
-        ]
-    },
-    '存储(DRAM,NAND)': {
-        'keywords': ['DRAM', 'NAND', 'SSD', '内存', '闪存', '美光', '三星', 'SK海力士', '铠侠', '西数', '涨价', '减产', '周期', '库存', 'HBM'],
-        'templates': [
-            "存储行业{event}进一步确认周期底部的信号。原厂减产幅度与资本开支收缩节奏，仍是决定供需平衡表修复速度及价格反弹弹性的核心变量，需持续跟踪季度位元出货量数据。",
-            "从{event}看，HBM3E及高带宽存储在AI服务器中的渗透，正在重塑存储产品结构的利润分布。主流DRAM及NAND的产能挤出效应，或加速中低容量产品的供应收紧。",
-            "此次{event}提示关注存储下游需求的结构性分化。消费电子复苏乏力与数据中心资本开支高增并存，模组厂及品牌客户的库存策略调整，将放大现货市场的价格波动。"
-        ]
-    },
-    'MTK SOC': {
-        'keywords': ['天玑', 'Dimensity', '9300', '9400', '9200', '旗舰', '中端', 'vivo', 'OPPO', '小米', '调优', 'AI', 'APU'],
-        'templates': [
-            "联发科{event}显示其借天玑旗舰系列向高端SoC市场发起持续冲击。与头部OEM的深度联调及软件生态投入，是改变其品牌认知、提升ASP的关键；需关注高通竞品迭代节奏的反制。",
-            "从{event}可见，联发科在汽车电子及智能座舱领域的横向拓展意图明显。座舱芯片算力SoC化趋势下，其与车厂Tier1的定点进度，是评估第二增长曲线的核心依据。",
-            "此次{event}反映出其在先进封装及制程升级上的跟进压力。台积电产能分配的优先级、3nm工艺良率爬坡速度，以及对Arm IP授权变动的适应能力，将长期影响其产品竞争力。"
-        ]
-    },
-    '高通 SOC': {
-        'keywords': ['骁龙', 'Snapdragon', '8 Gen', '7 Gen', '至尊', '三星', '小米', '荣耀', '专利', '授权', 'AI', '汽车'],
-        'templates': [
-            "高通{event}巩固其在安卓旗舰SoC及射频前端领域的定价权。自研Oryon CPU架构的能效表现，以及与三星、小米等头部客户的独家协议变动，是观察其份额稳定性的关键窗口。",
-            "从{event}看，高通在汽车智能座舱及智驾芯片上的布局进入收获期。Snapdragon Ride及座舱平台的量产装车品牌数与单车价值量，是决定其多元化成败的核心指标。",
-            "此次{event}提示需关注其与苹果基带合作的长期依赖风险，以及Arm诉讼、监管审查对专利授权费模式的潜在冲击。AI PC及XR领域的生态卡位，则是其估值支撑的新叙事。"
-        ]
-    },
-    'Robotics': {
-        'keywords': ['机器人', '人形', '智元', '宇树', 'Unitree', '特斯拉', 'Optimus', 'Figure', '波士顿动力', '伺服', '关节', '减速器'],
-        'templates': [
-            "人形机器人{event}印证该赛道正从实验室走向场景验证阶段。关节模组、灵巧手及感知系统的成本下探速度，是决定其能否在工业及商业服务场景实现经济性的关键约束。",
-            "从{event}可见，国内企业在执行器及运动控制算法上的迭代速度较快。但高端谐波减速器、力矩传感器等核心部件的进口依赖度，仍对其供应链安全及大规模量产构成挑战。",
-            "此次{event}反映出资本市场对具身智能产业化的乐观预期。特斯拉Optimus的量产时间表、国内政策对智能制造及养老场景的补贴力度，是影响行业估值锚的核心变量。"
-        ]
-    }
-}
-
-def _generate_fallback_insight(title: str, brand: str) -> str:
-    """
-    【v2.1核心】基于标题关键词提取，从模板库生成有实质内容的兜底洞察。
-    确保每条新闻都有洞察，绝不返回空字符串。
-    """
-    brand_tpl = _INSIGHT_TEMPLATES.get(brand)
-    if not brand_tpl:
-        # 极端情况：连品牌都没有模板，生成通用科技行业洞察
-        return f"该条资讯涉及{brand if brand else '科技行业'}最新动态，建议关注其对产业链上下游议价能力、竞品反应节奏及终端需求预期的潜在影响，后续需跟踪官方数据验证与渠道反馈。"
-    
-    # 从标题中提取匹配的关键词
-    title_lower = title.lower()
-    matched_kw = None
-    for kw in brand_tpl['keywords']:
-        if kw.lower() in title_lower:
-            matched_kw = kw
-            break
-    
-    # 选择模板：有匹配关键词优先，否则随机
-    import random
-    tpls = brand_tpl['templates']
-    tpl = random.choice(tpls)
-    
-    # 填充事件占位符
-    if matched_kw:
-        event_desc = f"「{matched_kw}」相关动作"
-    else:
-        event_desc = "最新产品/市场动作"
-    
-    insight = tpl.replace('{event}', event_desc).replace('{事件}', event_desc)
-    
-    # 确保长度在有效范围内
-    if len(insight) > AI_INSIGHT_MAX_CHARS:
-        insight = insight[:AI_INSIGHT_MAX_CHARS].rsplit('。', 1)[0] + '。'
-    
-    return insight
-
 
 # 行业关键词
 TARGET_BRANDS = {
@@ -646,7 +483,7 @@ TIME_FORMATS = [
     # 标准格式：2026-08-11 11:55:00
     (re.compile(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?'), '%Y-%m-%d %H:%M:%S'),
     # 中文格式：2026年8月3日 14:30
-    (re.compile(r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*(\d{1,2}):(\d{2})(?::(\d{2}))?'), '%Y年%m월%d일 %H:%M'),
+    (re.compile(r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*(\d{1,2}):(\d{2})(?::(\d{2}))?'), '%Y年%m月%d日 %H:%M'),
     # 数字时间戳（10位秒级）
     (re.compile(r'\b(1[5-9]\d{8})\b'), 'timestamp'),
     # 简短格式：08-03 14:30
@@ -1366,7 +1203,8 @@ def _ai_enhance_summary(title, body_text, source=""):
         return ""
 
 
-# ==================== AI 市场洞察(独立通道,与摘要解耦) ====================
+# ==================== AI 市场洞察【最终版：单层3次重试，无降级填充】 ====================
+
 def _trim_insight(text: str) -> str:
     """把 AI 输出收紧到 AI_INSIGHT_MIN_CHARS..AI_INSIGHT_MAX_CHARS,优先在句末标点切"""
     text = (text or "").strip()
@@ -1389,76 +1227,88 @@ def _trim_insight(text: str) -> str:
 
 
 def _ai_market_insight(title: str, body_text: str, brand: str = "") -> str:
-    """调用智谱GLM-4-Flash,对一条新闻生成 100-160字 的市场洞察。
-    失败/超时时返回空字符串,由调用方决定如何降级。
+    """
+    【唯一重试层】调用智谱API生成市场洞察。
+    共3次尝试：25s → 40s → 40s，递增超时。
+    全部失败返回空字符串，绝不编造。
     """
     if not ZHIPU_API_KEY or not AI_INSIGHT_ENABLED:
         return ""
-    if not title:
+    if not body_text or len(body_text) < 80:
         return ""
-    if not body_text:
-        body_text = title
+    if not title:
+        title = (body_text[:80] or "").replace("\n", " ").strip()
+    
     body = body_text[:2200] if len(body_text) > 2200 else body_text
     prompt = AI_INSIGHT_PROMPT.format(title=title or "", body=body, brand=brand or "未指明")
     url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
     headers = {"Authorization": f"Bearer {ZHIPU_API_KEY}", "Content-Type": "application/json"}
-    data = {
-        "model": AI_INSIGHT_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": AI_INSIGHT_MAX_TOKENS,
-        "temperature": 0.45,
-    }
-    try:
-        resp = requests.post(url, headers=headers, json=data, timeout=AI_INSIGHT_TIMEOUT)
-        if resp.status_code != 200:
-            print(f"  💡 AI洞察API返回{resp.status_code}：{resp.text[:80]}")
-            return ""
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
-        if not raw or raw.upper() == "SKIP":
-            return ""
-        # 去掉常见前缀
-        for prefix in ["市场洞察:", "市场洞察：", "洞察:", "洞察：", "📈 ", "💡 "]:
-            if raw.startswith(prefix):
-                raw = raw[len(prefix):].strip()
-        text = _trim_insight(raw)
-        if len(text) < 60:  # 太短的输出判定为无效
-            return ""
-        print(f"  💡 AI洞察生成成功（{len(text)}字）")
-        return text
-    except requests.exceptions.Timeout:
-        print(f"  ⚠️ AI洞察超时，跳过本条")
-        return ""
-    except Exception as e:
-        print(f"  ⚠️ AI洞察异常：{str(e)[:80]}")
-        return ""
+    
+    # 3次尝试：首次25s，重试40s、40s
+    timeouts = [AI_INSIGHT_TIMEOUT] + [AI_INSIGHT_RETRY_TIMEOUT] * AI_INSIGHT_MAX_RETRIES
+    
+    for attempt, timeout in enumerate(timeouts, 1):
+        try:
+            if attempt > 1:
+                wait = AI_INSIGHT_RATE_LIMIT + (attempt - 1)  # 2s, 3s
+                print(f"  💡 AI洞察第{attempt}次尝试({timeout}s)，等待{wait}s...")
+                time.sleep(wait)
+            else:
+                time.sleep(AI_INSIGHT_RATE_LIMIT)
+            
+            data = {
+                "model": AI_INSIGHT_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": AI_INSIGHT_MAX_TOKENS,
+                "temperature": 0.45,
+            }
+            resp = requests.post(url, headers=headers, json=data, timeout=timeout)
+            
+            if resp.status_code != 200:
+                print(f"  💡 API返回{resp.status_code}，继续重试...")
+                continue
+            
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            if not raw or raw.upper() == "SKIP":
+                print(f"  💡 返回空/SKIP，继续重试...")
+                continue
+            
+            # 清理前缀
+            for pfx in ["市场洞察:", "市场洞察：", "洞察:", "洞察：", "📈 ", "💡 "]:
+                if raw.startswith(pfx):
+                    raw = raw[len(pfx):].strip()
+            
+            result = _trim_insight(raw)
+            if len(result) >= 60:
+                print(f"  ✅ AI洞察成功（第{attempt}次，{len(result)}字）")
+                return result
+            else:
+                print(f"  💡 输出太短({len(result)}字)，继续重试...")
+                continue
+                
+        except requests.exceptions.Timeout:
+            print(f"  ⏱️ 超时({timeout}s)，继续重试...")
+            continue
+        except Exception as e:
+            print(f"  ⚠️ 异常：{str(e)[:60]}，继续重试...")
+            continue
+    
+    # 3次全失败
+    print(f"  ❌ AI洞察3次全失败：{title[:40]}...")
+    return ""
+
+
+# 【已删除】_insight_fallback() —— 不再使用极简降级文本填充
 
 
 def _generate_market_insight(title: str, body_text: str, brand: str = "") -> str:
     """
-    【v2.1】强制市场洞察生成：优先AI，失败时用规则模板兜底，绝不返回空字符串。
-    确保每条新闻都必有洞察内容（中文）。
+    【直通包装】单层调用，无额外重试，无降级填充。
+    失败时返回空字符串，由调用方处理（留空）。
     """
-    # 第1层：尝试AI洞察
-    ai_result = ""
-    if AI_INSIGHT_ENABLED and ZHIPU_API_KEY and title:
-        try:
-            time.sleep(AI_INSIGHT_RATE_LIMIT)
-            ai_result = _ai_market_insight(title.strip(), body_text or title, brand or "")
-            if ai_result and len(ai_result) >= AI_INSIGHT_MIN_CHARS - 30:
-                return ai_result
-        except Exception as e:
-            print(f"  ⚠️ AI洞察调用异常: {str(e)[:60]}")
-    
-    # 【v2.1关键】第2层：AI失败或太短→用规则模板兜底（基于品牌+标题关键词）
-    fallback = _generate_fallback_insight(title or "", brand or "")
-    if fallback and len(fallback) >= 40:
-        print(f"  🛡️ 使用规则兜底洞察（{len(fallback)}字）")
-        return fallback
-    
-    # 极端兜底（理论上不会走到这里，但防万一）
-    return (f"📌 【市场观察】从近期动作来看，{brand if brand else '相关品牌'}业务动态"
-            f"可能影响产业链上下游议价节奏，建议关注后续官方披露与竞品反馈，"
-            f"以判断本则新闻的实质力度。")
+    if not body_text or len(body_text) < 80:
+        return ""
+    return _ai_market_insight(title or "", body_text, brand or "")
 
 
 def _trim_summary(text, target_len=280):
@@ -2037,19 +1887,12 @@ def filter_brand_news_parallel(raw_all_list, hours=24):
         
         brand_count[match_brand] = brand_count.get(match_brand, 0) + 1
         
-        # 【v2.1】强制生成市场洞察：即使AI失败也用规则兜底，绝不返回空
-        insight = ""
-        try:
-            # 用 summary 或 title 作为 body_text 传给洞察生成器（summary可能为空但title总有）
-            body_for_insight = sm if sm and len(sm) > 20 else title
-            insight = _generate_market_insight(title, body_for_insight, match_brand)
-        except Exception as e:
-            print(f"  ⚠️ 洞察生成异常: {str(e)[:60]}，使用兜底")
-            insight = _generate_fallback_insight(title, match_brand)
+        # 【最终版】单次AI洞察调用，3次内层重试，无额外外层重试，无降级填充
+        insight = _generate_market_insight(title, sm or title, match_brand)
         
-        # 确保最终insight不为空
+        # 最终无洞察则留空，不填充
         if not insight:
-            insight = _generate_fallback_insight(title, match_brand)
+            print(f"  ⚠️ 该新闻无AI洞察：{title[:40]}...")
         
         with _prog_lock:
             _progress[2] += 1
@@ -2057,7 +1900,7 @@ def filter_brand_news_parallel(raw_all_list, hours=24):
         return {
             'title': title, 'url': url, 'source': source,
             'brand': match_brand, 'pub_time': final_time, 'summary': sm,
-            'insight': insight,
+            'insight': insight,  # 可能为空
         }
     
     # 15并发执行详情抓取
@@ -2069,9 +1912,6 @@ def filter_brand_news_parallel(raw_all_list, hours=24):
             try:
                 result = future.result(timeout=45)
                 if result and isinstance(result, dict):
-                    # 二次检查确保insight存在
-                    if not result.get('insight'):
-                        result['insight'] = _generate_fallback_insight(result['title'], result.get('brand', ''))
                     matched_news.append(result)
                 elif result and result[0] == 'TIME_SKIP':
                     time_skipped_list += 1
@@ -2458,14 +2298,8 @@ def generate_html_report(news_items, report_date):
             item['kr_title'] = kr_title
             item['kr_summary'] = kr_summary
 
-            # 【v2.1】强制市场洞察：每条新闻必定有insight
+            # ---- AI 市场洞察(中) + 译韩 ----
             ic = (item.get('insight') or "").strip()
-            # 如果insight为空（理论上不应该，但保险处理），生成兜底
-            if not ic:
-                ic = _generate_fallback_insight(tc, item.get('brand', ''))
-                item['insight'] = ic  # 更新到item中
-            
-            # ---- AI 市场洞察 译韩 ----
             kr_insight = ""
             if ic:
                 try:
@@ -2475,15 +2309,11 @@ def generate_html_report(news_items, report_date):
                 except Exception as e:
                     print(f"洞察翻译异常: {e}")
                     kr_insight = ""
-            # 【v2.1】如果韩文洞察为空但中文有，用中文兜底显示（避免韩文侧完全空白）
-            if not kr_insight and ic:
-                kr_insight = f"[번역중] {ic[:80]}..." if len(ic) > 80 else ic
             item['kr_insight'] = kr_insight
 
             # 摘要为空时隐藏摘要行（如 CFM 只抓标题不抓摘要）
             zh_summary_html = f'<div class="news-summary">{sc}</div>' if sc else ''
             kr_summary_html = f'<div class="news-summary">{kr_summary}</div>' if kr_summary else ''
-            # 强制显示市场洞察（中英文一定有）
             zh_insight_html = f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span>{ic}</div>' if ic else ''
             kr_insight_html = f'<div class="news-insight kr"><span class="insight-label">💡 시사점</span>{kr_insight}</div>' if kr_insight else ''
 
@@ -2659,15 +2489,12 @@ def _generate_excel(news_items, report_date):
                     cn_text_frag, f"摘要：{item['summary']}",
                     cn_text_frag, "\n",
                 ])
-            # 【v2.1】强制洞察
-            insight_cn = item.get('insight', '') or ''
-            if not insight_cn:
-                insight_cn = _generate_fallback_insight(item.get('title', ''), item.get('brand', ''))
-            cn_segments.extend([
-                cn_insight_label_frag, "AI市场洞察:\n",
-                cn_insight_text_frag, insight_cn,
-                cn_text_frag, "\n",
-            ])
+            if item.get('insight'):
+                cn_segments.extend([
+                    cn_insight_label_frag, "AI市场洞察:\n",
+                    cn_insight_text_frag, item['insight'],
+                    cn_text_frag, "\n",
+                ])
             cn_segments.extend([
                 cn_meta_frag, f"\n{t_show}  |  {url}",
             ])
@@ -2676,6 +2503,7 @@ def _generate_excel(news_items, report_date):
             # ---- 右列：韩文富文本 ----
             kr_title = item.get('kr_title', '')
             kr_summary = item.get('kr_summary', '')
+            kr_insight = item.get('kr_insight', '')
             kr_segments = []
             if kr_title:
                 kr_segments.extend([
@@ -2687,15 +2515,6 @@ def _generate_excel(news_items, report_date):
                     kr_text_frag, kr_summary,
                     kr_text_frag, "\n",
                 ])
-            # 【v2.1】韩文洞察：优先已翻译的，否则尝试翻译，再不行用中文兜底
-            kr_insight = item.get('kr_insight', '') or ''
-            if not kr_insight and insight_cn:
-                try:
-                    kr_insight = translate_text(insight_cn)
-                except:
-                    kr_insight = insight_cn if len(insight_cn) < 100 else insight_cn[:100] + "..."
-                if not kr_insight:
-                    kr_insight = insight_cn[:120]
             if kr_insight:
                 kr_segments.extend([
                     kr_insight_label_frag, "AI시사점:\n",
@@ -2887,17 +2706,8 @@ def _generate_outlook_table_html(news_items, report_date):
             t_show = item['pub_time'].strftime('%Y-%m-%d %H:%M') if item.get('pub_time') else ''
             kr_title = item.get('kr_title', '')
             kr_summary = item.get('kr_summary', '')
-            # 【v2.1】强制洞察
             insight_cn = item.get('insight', '') or ''
-            if not insight_cn:
-                insight_cn = _generate_fallback_insight(title_cn, item.get('brand', ''))
             kr_insight = item.get('kr_insight', '') or ''
-            # 确保韩文洞察不为空
-            if not kr_insight and insight_cn:
-                try:
-                    kr_insight = translate_text(insight_cn)
-                except:
-                    kr_insight = insight_cn if len(insight_cn) < 100 else insight_cn[:100] + "..."
 
             # HTML转义
             title_cn_esc = title_cn.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
@@ -2910,8 +2720,8 @@ def _generate_outlook_table_html(news_items, report_date):
             cn_cell = f'<div class="news-title"><a href="{url}">{title_cn_esc}</a></div>'
             if summary_cn_esc:
                 cn_cell += f'<div class="news-summary">{summary_cn_esc}</div>'
-            # 强制显示洞察
-            cn_cell += f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span>{insight_cn_esc}</div>'
+            if insight_cn_esc:
+                cn_cell += f'<div class="news-insight"><span class="insight-label">💡 市场洞察</span>{insight_cn_esc}</div>'
             cn_cell += f'<div class="news-meta"><span class="source-tag">{src}</span> 🕐 {t_show}</div>'
 
             kr_cell = f'<div class="news-title"><a href="{url}">{kr_title_esc}</a></div>'
@@ -3028,7 +2838,7 @@ def send_email(html_content, report_date, script_path=None, item_count=0, news_i
 def main():
     SCRIPT_START_TIME = datetime.now()
     print("="*72)
-    print("十四源行业新闻采集【并行优化版 - v2.1 强制市场洞察版】")
+    print("十四源行业新闻采集【并行优化版 - AI洞察单层重试版】")
     print(f"脚本执行时间：{SCRIPT_START_TIME.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"时间窗口：24小时（{ (SCRIPT_START_TIME - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')} ~ {SCRIPT_START_TIME.strftime('%Y-%m-%d %H:%M:%S')}）")
     print("="*72)
