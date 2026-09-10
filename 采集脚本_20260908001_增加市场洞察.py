@@ -2317,8 +2317,8 @@ def generate_html_report(news_items, report_date):
             zh_summary_html = f'<div class="news-summary">{sc}</div>' if sc else ''
             kr_summary_html = f'<div class="news-summary">{kr_summary}</div>' if kr_summary else ''
             # 【修复】使用 <div> 替代 <span> 并添加内联样式，确保Outlook兼容换行
-            zh_insight_html = f'<div class="news-insight"><div class="insight-label" style="font-weight:700;color:#636e72;margin-bottom:4px;display:block;">💡 市场洞察</div><div>{ic}</div></div>' if ic else ''
-            kr_insight_html = f'<div class="news-insight kr"><div class="insight-label" style="font-weight:700;color:#636e72;margin-bottom:4px;display:block;">💡 시사점</div><div>{kr_insight}</div></div>' if kr_insight else ''
+            zh_insight_html = f'<div class="news-insight"><div class="insight-label" style="font-weight:700;color:#636e72;margin-bottom:4px;display:block;">💡AI 市场洞察</div><div>{ic}</div></div>' if ic else ''
+            kr_insight_html = f'<div class="news-insight kr"><div class="insight-label" style="font-weight:700;color:#636e72;margin-bottom:4px;display:block;">💡AI 시사점</div><div>{kr_insight}</div></div>' if kr_insight else ''
 
             html_parts.append(f'''
 <div class="news-item">
@@ -2494,7 +2494,7 @@ def _generate_excel(news_items, report_date):
                 ])
             if item.get('insight'):
                 cn_segments.extend([
-                    cn_insight_label_frag, "AI市场洞察:\n",
+                    cn_insight_label_frag, "💡AI 市场洞察:\n",
                     cn_insight_text_frag, item['insight'],
                     cn_text_frag, "\n",
                 ])
@@ -2520,7 +2520,7 @@ def _generate_excel(news_items, report_date):
                 ])
             if kr_insight:
                 kr_segments.extend([
-                    kr_insight_label_frag, "AI시사점:\n",
+                    kr_insight_label_frag, "💡AI 시사점:\n",
                     kr_insight_text_frag, kr_insight,
                 ])
             if kr_segments:
@@ -2725,14 +2725,14 @@ def _generate_outlook_table_html(news_items, report_date):
                 cn_cell += f'<div class="news-summary">{summary_cn_esc}</div>'
             if insight_cn_esc:
 				# 【修复】使用 <div> + 内联样式替代 <span>，确保Outlook兼容换行
-                cn_cell += f'<div class="news-insight" style="font-size:11px;color:#636e72;line-height:1.6;margin-top:4px;margin-bottom:4px;"><div style="font-weight:700;color:#636e72;margin-bottom:4px;">💡 市场洞察</div><div>{insight_cn_esc}</div></div>'
+                cn_cell += f'<div class="news-insight" style="font-size:11px;color:#636e72;line-height:1.6;margin-top:4px;margin-bottom:4px;"><div style="font-weight:700;color:#636e72;margin-bottom:4px;">💡AI 市场洞察</div><div>{insight_cn_esc}</div></div>'
                 cn_cell += f'<div class="news-meta"><span class="source-tag">{src}</span> 🕐 {t_show}</div>'
 
             kr_cell = f'<div class="news-title"><a href="{url}">{kr_title_esc}</a></div>'
             if kr_summary_esc:
                 kr_cell += f'<div class="news-summary">{kr_summary_esc}</div>'
             if kr_insight_esc:
-                kr_cell += f'<div class="news-insight kr" style="font-size:11px;color:#636e72;line-height:1.6;margin-top:4px;margin-bottom:4px;"><div style="font-weight:700;color:#636e72;margin-bottom:4px;">💡 시사점</div><div>{kr_insight_esc}</div></div>'
+                kr_cell += f'<div class="news-insight kr" style="font-size:11px;color:#636e72;line-height:1.6;margin-top:4px;margin-bottom:4px;"><div style="font-weight:700;color:#636e72;margin-bottom:4px;">💡AI 시사점</div><div>{kr_insight_esc}</div></div>'
 
             html_parts.append(f'''    <tr class="news-row">
         <td class="col-zh" style="width:340px; padding:10px 24px; vertical-align:top; background-color:#eef2f7; border-bottom:1px solid #eef1f3;">
